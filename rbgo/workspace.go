@@ -29,9 +29,9 @@ func NewWorkspace(path string) (*Workspace, error) {
 	}
 	w.sourceEntry = path
 	//w.objectPath = filepath.Join(path, "pkg")
-	_, err = os.Stat(filepath.Join(path, "src"))
-	if err == nil {
-		w.sourceEntry = filepath.Join(path, "src")
+	s := filepath.Join(path, "src")
+	if _, err = os.Stat(s); err == nil {
+		w.sourceEntry = s
 	}
 	w.AddPackageRoot("golang.org/x/[a-zA-Z0-9_-]+")
 	w.AddPackageRoot("github.com/[a-zA-Z0-9_-]+/[a-zA-Z0-9_-]+")

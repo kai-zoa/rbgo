@@ -6,9 +6,11 @@ import (
 	"path/filepath"
 	"os"
 	"time"
+	"sync"
 )
 
 const (
+	EventFound = EventName("Found")
 	EventUpdate = EventName("Update")
 	EventDelete = EventName("Delete")
 )
@@ -20,28 +22,72 @@ type Event struct {
 	Pacakge *Package
 }
 
+type EventBuffer struct {
+	b []*Event
+	m *sync.Mutex
+	t time.Time
+}
+
+func (e *EventBuffer) init() {
+	e.b = make([]*Event, 0)
+	e.m = new(sync.Mutex)
+	e.t = time.Now()
+}
+
+func (e *EventBuffer) add(event *Event) {
+	e.m.Lock()
+	defer e.m.Unlock()
+	e.b = append(e.b, event)
+	e.t = time.Now()
+}
+
+func (e *EventBuffer) fetch() (events []*Event) {
+	e.m.Lock()
+	defer e.m.Unlock()
+	elapse := (time.Now().Sub(e.t) / time.Millisecond)
+	if len(e.b) > 0 && elapse > 1000 {
+		var prev *Event
+		events = make([]*Event, 0, len(e.b))
+		for _, ev := range e.b {
+			if prev != nil &&
+			prev.Name == ev.Name &&
+			prev.Pacakge.WatchPath == ev.Pacakge.WatchPath {
+				continue
+			}
+			events = append(events ,ev)
+			prev = ev
+		}
+		e.b = make([]*Event, 0, len(e.b))
+	}
+	return events
+}
+
 type Watcher struct {
 	Workspace *Workspace
-	event     chan *Event
 	factory   *TaskFactory
 }
 
 func (w *Watcher) Watch() error {
-	w.event = make(chan *Event)
 	watcher, err := fsnotify.NewWatcher()
 	if err != nil {
 		return err
 	}
 	defer watcher.Close()
 
-	watchFn := func(path string) {
-		watcher.Watch(path)
-	}
+	buf := EventBuffer{}
+	buf.init()
 	go func() {
 		for {
 			select {
-			case event := <-watcher.Event:
-				w.handleFSNotify(event, watchFn)
+			case fsev := <-watcher.Event:
+				events := handleFSNotify(w.Workspace, fsev)
+				for _, e := range events {
+					if e.Name == EventFound {
+						watcher.Watch(e.Pacakge.WatchPath)
+					} else {
+						buf.add(e)
+					}
+				}
 
 			case event := <-watcher.Error:
 				fmt.Println("error " + event.Error())
@@ -49,25 +95,82 @@ func (w *Watcher) Watch() error {
 		}
 	}()
 
-	if err := w.Workspace.Walk(func(path string) error {
+	err = w.Workspace.Walk(func(path string) error {
 		return watcher.Watch(path)
-	}); err != nil {
+	})
+	if err != nil {
 		return err
 	}
 
-	return w.watchEvents()
+	factory := TaskFactory{Package: w.Workspace.Package}
+	runTask := func(pkg *Package) {
+		task, err := factory.New(pkg.WatchPath)
+		if err != nil {
+			fmt.Printf("Error: %s\n", err)
+		}
+		if err := build(task); err != nil {
+			fmt.Printf("Error: %s\n", err)
+		}
+	}
+
+	// Build All
+	all := w.Workspace.Package.All()
+	packages := make(map[string]*Package, len(all))
+	for _, pkg := range all {
+		packages[pkg.ObjectPath] = pkg
+	}
+	for _, pkg := range packages {
+		runTask(pkg)
+	}
+
+	// Watch iNotify Events
+	for {
+		if events := buf.fetch(); events != nil {
+			for _, e := range events {
+				fmt.Printf("%s: %s\n", e.Name, e.Pacakge.WatchPath)
+				if e.Name == EventUpdate {
+					runTask(e.Pacakge)
+				}
+			}
+		}
+		time.Sleep(time.Second)
+	}
+	return nil
 }
 
-func (w *Watcher) handleFSNotify(event *fsnotify.FileEvent, watch func(string)) {
-	fmt.Printf("%v\n", event)
-	ws := w.Workspace
-	events := []*Event{}
+func build(task *Task) error {
+	for {
+		if dep, err := task.FindDepends(); err != nil {
+			return err
+		} else if dep != nil {
+			if err := build(dep); err != nil {
+				return err
+			}
+		} else {
+			break
+		}
+	}
+	updated := false
+	if fi, err := os.Stat(task.ObjectPath); err != nil {
+		updated = true
+	} else if (fi.ModTime().Before(task.Package.ModTime)) {
+		updated = true
+	}
+	if updated {
+		fmt.Printf("Build: %s %s\n", task.ObjectPath, task.SourcePath)
+		if err := task.Build(); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func handleFSNotify(ws *Workspace, event *fsnotify.FileEvent) []*Event {
+	//fmt.Printf("%v\n", event)
+	events := []*Event{} // FIXME
 	defer func() {
 		if len(events) > 0 {
 			ws.Package.UpdateDepends()
-		}
-		for _, e := range events {
-			w.event <- e
 		}
 	}()
 	path := event.Name
@@ -80,7 +183,7 @@ func (w *Watcher) handleFSNotify(event *fsnotify.FileEvent, watch func(string)) 
 			pkg.Scan(ws.PackageRoot)
 			events = append(events, &Event{Name: EventUpdate, Pacakge: pkg})
 		}
-		return
+		return events
 	}
 	if fi.IsDir() {
 
@@ -97,14 +200,14 @@ func (w *Watcher) handleFSNotify(event *fsnotify.FileEvent, watch func(string)) 
 		path = filepath.Dir(path)
 
 	} else {
-		return
+		return events
 	}
 
 	pkg := ws.Package.FindByPath(path)
 	found := pkg != nil
 	if !found {
 		pkg = ws.NewPackage(path)
-		watch(path)
+		events = append(events, &Event{Name: EventFound, Pacakge: pkg})
 	}
 	if err := pkg.Scan(ws.PackageRoot); err == SourceNotFound {
 		if found {
@@ -116,22 +219,6 @@ func (w *Watcher) handleFSNotify(event *fsnotify.FileEvent, watch func(string)) 
 		ws.Package.Put(pkg)
 		events = append(events, &Event{Name: EventUpdate, Pacakge: pkg})
 	}
-}
 
-func (w *Watcher) watchEvents() error {
-	for {
-		e := <-w.event
-		time.Sleep(200 * time.Millisecond)
-		receivedEvents := []*Event{e}
-		if length := len(w.event); length > 0 {
-			for i := 0; i < length; i += 1 {
-				receivedEvents = append(receivedEvents, <-w.event)
-			}
-		}
-		for _, e := range receivedEvents {
-
-			fmt.Printf("%s: %s\n", e.Name, e.Pacakge.WatchPath)
-		}
-	}
-	return nil
+	return events
 }

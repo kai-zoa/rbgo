@@ -128,8 +128,13 @@ func (p *Package) Scan(f PackageRootFinder) error {
 	wd := p.sourceRoot
 	if strings.HasSuffix(p.sourceRoot, "src") {
 		i := strings.LastIndex(p.sourceRoot, "/src")
-		wd = p.sourceRoot[:i]
-		objectEntry = filepath.Join(wd, "pkg")
+		if i != -1 {
+			wd = p.sourceRoot[:i]
+			objectEntry = filepath.Join(wd, "pkg")
+		} else {
+			wd = "."
+			objectEntry = "pkg"
+		}
 	}
 	p.WorkDir, _ = filepath.Abs(wd)
 	if p.InVendor {

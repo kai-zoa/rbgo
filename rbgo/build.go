@@ -33,6 +33,17 @@ func newJob(pkg *Package, r *PackageRepository) *Task {
 	}
 }
 
+func normalizePath(s string) string {
+	if s == "" {
+		return "."
+	}
+	// FIXME for Windows
+	if strings.HasPrefix(s, "/") || strings.HasPrefix(s, "./") || strings.HasPrefix(s, "../"){
+		return s
+	}
+	return fmt.Sprintf("./%s", s)
+}
+
 type Task struct {
 	PackageName string
 	SourcePath  string
@@ -43,8 +54,10 @@ type Task struct {
 
 func (t *Task) Build() error {
 
+	object := normalizePath(t.ObjectPath)
+	source := normalizePath(t.SourcePath)
 	arguments := []string{"build"}
-	arguments = append(arguments, ([]string{"-o", t.ObjectPath, t.SourcePath})...)
+	arguments = append(arguments, ([]string{"-o", object, source})...)
 	command := exec.Command("go", arguments...)
 	command.Dir = t.Package.WorkDir
 	// Set GOPATH
@@ -62,6 +75,8 @@ func (t *Task) Build() error {
 		sep = ";"
 	}
 	goPath = strings.Join([]string{t.Package.WorkDir, goPath}, sep)
+	//fmt.Println(t.Package.WorkDir)
+	//fmt.Printf("%v\n", arguments)
 	env = append(env, fmt.Sprintf("%s=%s", "GOPATH", goPath))
 	command.Env = env
 
@@ -81,6 +96,7 @@ func (t *Task) Build() error {
 	io.Copy(os.Stdout, stdout)
 	errBuf, _ := ioutil.ReadAll(stderr)
 
+	//fmt.Printf("waiting for `go %v`\n", arguments)
 	if err := command.Wait(); err != nil {
 		return errors.New(string(errBuf))
 	}
@@ -93,7 +109,8 @@ func (t *Task) FindDepends() (*Task, error) {
 	if err != nil {
 		return nil, err
 	}
-	if t.Package.ObjectPath != dep.ObjectPath {
+	if dep != nil && t.Package.ObjectPath != dep.ObjectPath {
+		//fmt.Printf("%s for %s\n", t.Package.ObjectPath, dep.ObjectPath)
 		return newJob(dep, t.repo), nil
 	}
 	return nil, nil
