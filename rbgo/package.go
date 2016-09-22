@@ -17,10 +17,76 @@ import (
 
 var (
 	SourceNotFound = errors.New("SourceNotFound")
+	PackageDirName = ""
 )
+
+func init() {
+	goOS, goArch := runtime.GOOS, runtime.GOARCH
+	for _, e := range os.Environ() {
+		pair := strings.Split(e, "=")
+		if pair[0] == "GOOS" {
+			goOS = pair[1]
+		}
+		if pair[1] == "GOARCH" {
+			goArch = pair[1]
+		}
+	}
+	PackageDirName = filepath.Join("pkg", fmt.Sprintf("%s_%s", goOS, goArch))
+}
 
 func IsGoSource(path string) bool {
 	return strings.HasSuffix(path, ".go") && !strings.HasSuffix(path, "_test.go")
+}
+
+type Source struct {
+	packageName string
+	modTime     time.Time
+	imports     []string
+}
+
+func ScanSources(path string) ([]Source, error) {
+	files, err := ioutil.ReadDir(path)
+	if err != nil {
+		return nil, err
+	}
+	name := ""
+	sources := make([]Source, 0, len(files))
+	for _, fi := range files {
+		fpath := filepath.Join(path, fi.Name())
+		if !IsGoSource(fpath) {
+			continue
+		}
+		fs := token.NewFileSet()
+		astFile, err := parser.ParseFile(fs, fpath, nil, parser.ImportsOnly)
+		if err != nil {
+			return nil, err
+		}
+		if astFile.Name.Name == "main" {
+			continue
+		}
+		if name != "" && name != astFile.Name.Name {
+			return nil, fmt.Errorf("found multiple packages %s, %s ...", name, astFile.Name.Name)
+		}
+		src := Source{
+			packageName: name,
+			modTime: fi.ModTime(),
+			imports: []string{},
+		}
+		sources = append(sources, src)
+		name = astFile.Name.Name
+		for _, decl := range astFile.Decls {
+			if gd, ok := decl.(*ast.GenDecl); ok {
+				if gd.Tok == token.IMPORT {
+					for _, sp := range gd.Specs {
+						if s, ok := sp.(*ast.ImportSpec); ok {
+							src.imports = append(src.imports, strings.Trim(s.Path.Value, "\""))
+						}
+					}
+				}
+			}
+		}
+	}
+	return sources, nil
 }
 
 func NewPackage(sourceRoot, watchPath string) *Package {
@@ -63,49 +129,26 @@ func (p *Package) Scan(f PackageRootFinder) error {
 	p.ProjectName = ""
 	p.SourceCount = 0
 	p.ModTime = time.Time{}
-	files, err := ioutil.ReadDir(p.WatchPath)
+	name := ""
+	// Scan Sources
+	sources, err := ScanSources(p.WatchPath)
 	if err != nil {
 		return err
 	}
-	name := ""
-	imports := make([]string, 0, len(p.Imports))
-	for _, fi := range files {
-		fpath := filepath.Join(p.WatchPath, fi.Name())
-		if !IsGoSource(fpath) {
-			continue
-		}
-		fs := token.NewFileSet()
-		astFile, err := parser.ParseFile(fs, fpath, nil, parser.ImportsOnly)
-		if err != nil {
-			return err
-		}
-		if astFile.Name.Name == "main" {
-			continue
-		}
-		t := fi.ModTime()
-		if p.ModTime.Before(t) {
-			p.ModTime = t
-		}
-		p.SourceCount += 1
-		if name != "" && name != astFile.Name.Name {
-			return fmt.Errorf("found multiple packages %s, %s ...", name, astFile.Name.Name)
-		}
-		name = astFile.Name.Name
-		for _, decl := range astFile.Decls {
-			if gd, ok := decl.(*ast.GenDecl); ok {
-				if gd.Tok == token.IMPORT {
-					for _, sp := range gd.Specs {
-						if s, ok := sp.(*ast.ImportSpec); ok {
-							imports = append(imports, strings.Trim(s.Path.Value, "\""))
-						}
-					}
-				}
-			}
-		}
-	}
+	p.SourceCount = len(sources)
 	if p.SourceCount == 0 {
 		return SourceNotFound
 	}
+	imports := make([]string, 0, len(p.Imports))
+	for _, s := range sources {
+		name = s.packageName
+		t := s.modTime
+		if p.ModTime.Before(t) {
+			p.ModTime = t
+		}
+		imports = append(imports, s.imports...)
+	}
+	//
 	p.Name = name
 	p.FullName = name
 	p.Imports = imports
@@ -116,7 +159,10 @@ func (p *Package) Scan(f PackageRootFinder) error {
 	if strings.HasPrefix(p.WatchPath, vendorEntry) {
 
 		p.FullName = absWatchPath[len(absVendorPath) + 1:]
-		p.ProjectName = f.Find(p.FullName)
+		p.ProjectName, err = f.VendorProjectName(vendorEntry, p.FullName)
+		if err != nil {
+			return err
+		}
 		p.SourcePath = filepath.Join(vendorEntry, filepath.Join(strings.Split(p.ProjectName, "/")...))
 		p.InVendor = true
 
@@ -124,16 +170,17 @@ func (p *Package) Scan(f PackageRootFinder) error {
 		p.FullName = absWatchPath[len(absSourceRoot) + 1:]
 		p.SourcePath = p.WatchPath
 	}
-	objectEntry := filepath.Join(p.sourceRoot, "pkg")
+	pkgDir := PackageDirName
+	objectEntry := filepath.Join(p.sourceRoot, pkgDir)
 	wd := p.sourceRoot
 	if strings.HasSuffix(p.sourceRoot, "src") {
 		i := strings.LastIndex(p.sourceRoot, "/src")
 		if i != -1 {
 			wd = p.sourceRoot[:i]
-			objectEntry = filepath.Join(wd, "pkg")
+			objectEntry = filepath.Join(wd, pkgDir)
 		} else {
 			wd = "."
-			objectEntry = "pkg"
+			objectEntry = pkgDir
 		}
 	}
 	p.WorkDir, _ = filepath.Abs(wd)
@@ -214,7 +261,7 @@ func (r *PackageRepository) Delete(pkg *Package) {
 	if found {
 		for i, p := range pkgs {
 			if p == pkg {
-				r.dirToPkgs[dir] = append(pkgs[:i], pkgs[i+1:]...)
+				r.dirToPkgs[dir] = append(pkgs[:i], pkgs[i + 1:]...)
 				break
 			}
 		}
@@ -236,11 +283,15 @@ func (r *PackageRepository) ProjectReferrers(pn string) []*Package {
 }
 
 func (r *PackageRepository) UpdateDepends() {
-	goPath := []string{runtime.GOROOT()}
+	goPath := []string{filepath.Join(runtime.GOROOT(), "src")}
+	//fmt.Printf("%v\n", goPath)
 	r.extPrj = make(map[string]*PackageRepository, len(r.extPrj))
 	for _, pkg := range r.All() {
 		pkg.MissingImports = make([]string, 0, len(pkg.MissingImports))
 		for _, imp := range pkg.Imports {
+			if imp == "C" || imp == "appengine/cloudsql" {
+				continue
+			}
 			ref := r.FindByImportName(imp)
 			if ref != nil {
 				ref.Referrers = append(ref.Referrers, pkg)
@@ -281,4 +332,34 @@ func (f PackageRootFinder) Find(packageName string) string {
 		}
 	}
 	return ""
+}
+
+func (f PackageRootFinder) VendorProjectName(vendorEntry, packageName string) (string, error) {
+	projectName := f.Find(packageName)
+	if projectName != packageName {
+		packageRoot := filepath.Join(vendorEntry, projectName)
+		sources, err := ScanSources(packageRoot)
+		if err != nil {
+			return "", err
+		}
+		if len(sources) == 0 {
+			sourceDir :=  filepath.Join(vendorEntry, packageName)
+			for {
+				nextDir :=  filepath.Dir(sourceDir)
+				if nextDir == packageRoot {
+					break
+				}
+				sources, err := ScanSources(nextDir)
+				if err != nil {
+					return "", err
+				}
+				if len(sources) == 0 {
+					break
+				}
+				sourceDir = nextDir
+			}
+			projectName = sourceDir[len(vendorEntry) + 1:]
+		}
+	}
+	return projectName, nil
 }

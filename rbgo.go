@@ -14,5 +14,7 @@ func main() {
 		fmt.Println(err)
 	}
 	watcher := Watcher{Workspace:ws}
-	watcher.Watch()
+	if err := watcher.Watch(); err != nil {
+		fmt.Println(err)
+	}
 }

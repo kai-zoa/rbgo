@@ -7,6 +7,7 @@ import (
 	"os"
 	"time"
 	"sync"
+	"strings"
 )
 
 const (
@@ -95,9 +96,16 @@ func (w *Watcher) Watch() error {
 		}
 	}()
 
+	n := 0
+	vendorDir := filepath.Join(w.Workspace.sourceEntry, "vendor")
 	err = w.Workspace.Walk(func(path string) error {
+		if strings.HasPrefix(path, vendorDir) {
+			return nil
+		}
+		n += 1
 		return watcher.Watch(path)
 	})
+	fmt.Printf("Watch %d directories\n", n)
 	if err != nil {
 		return err
 	}
@@ -114,6 +122,7 @@ func (w *Watcher) Watch() error {
 	}
 
 	// Build All
+	fmt.Println("--- First Build Start")
 	all := w.Workspace.Package.All()
 	packages := make(map[string]*Package, len(all))
 	for _, pkg := range all {
@@ -124,6 +133,7 @@ func (w *Watcher) Watch() error {
 	}
 
 	// Watch iNotify Events
+	fmt.Println("--- Watch Start")
 	for {
 		if events := buf.fetch(); events != nil {
 			for _, e := range events {
@@ -157,7 +167,7 @@ func build(task *Task) error {
 		updated = true
 	}
 	if updated {
-		fmt.Printf("Build: %s %s\n", task.ObjectPath, task.SourcePath)
+		//fmt.Printf("Build: %s\n", task.ObjectPath)
 		if err := task.Build(); err != nil {
 			return err
 		}

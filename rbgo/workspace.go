@@ -68,9 +68,11 @@ func (w *Workspace) Init() error {
 		err := pkg.Scan(w.PackageRoot)
 		if err == nil {
 			w.Package.Put(pkg)
-			fmt.Printf("import: %s\n", pkg.FullName)
+		//	fmt.Printf("import: %s\n", pkg.FullName)
+		//} else if err == SourceNotFound {
+		//	fmt.Printf("SourceNotFound: %s, %v\n", pkg.WatchPath, err)
 		} else if err != SourceNotFound {
-			fmt.Printf("fresh: %s, %v\n", pkg.WatchPath, err)
+			fmt.Printf("Error: %s, %v\n", pkg.WatchPath, err)
 		}
 		return nil
 	})

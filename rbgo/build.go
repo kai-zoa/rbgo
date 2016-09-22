@@ -89,6 +89,7 @@ func (t *Task) Build() error {
 	if err != nil {
 		return err
 	}
+	fmt.Println(strings.Join(command.Args, " "))
 	if err := command.Start(); err != nil {
 		return err
 	}
