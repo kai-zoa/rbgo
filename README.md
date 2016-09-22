@@ -1,2 +1,2 @@
 # RBGO
-Continious rebuild your go binary objects.
+Continuous rebuild your go binary objects.
